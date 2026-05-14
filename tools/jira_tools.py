@@ -39,12 +39,22 @@ CREATE_JIRA_TICKET_DECLARATION = {
         }
     }
 
-def create_jira_ticket(summary: str, description: str, issue_type: str, priority: str, acceptance_criteria: str) -> dict[str, int|str]:
+def create_jira_ticket(summary: str, description: str, issue_type: str, priority: str, acceptance_criteria: str = "", attachments: str = "") -> dict[str, int|str]:
     url = f"{jira_base_url}/rest/api/3/issue"
     auth = HTTPBasicAuth(jira_email, jira_api_token)
     headers = {
         "Accept": "application/json",
         "Content-Type": "application/json"
+    }
+    priority_map = {
+        "low": "Low",
+        "medium": "Medium",
+        "high": "High",
+        "critical": "Highest"
+    }
+    issue_type_map = {
+        "bug": "Bug",
+        "feature": "Story"
     }
     payload = json.dumps({
         "fields": {
@@ -60,8 +70,8 @@ def create_jira_ticket(summary: str, description: str, issue_type: str, priority
                     }
                 ]
             },
-            "issuetype": {"name": issue_type.capitalize()},
-            "priority": {"name": priority.capitalize()},
+            "issuetype": {"name": issue_type_map.get(issue_type.lower(), "Bug")},
+            "priority": {"name": priority_map.get(priority.lower(), "Medium")},
         }
     })
     

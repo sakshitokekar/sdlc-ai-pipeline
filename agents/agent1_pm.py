@@ -1,18 +1,20 @@
 # PM agent
+from typing import TypedDict
 from google import genai
 from google.genai import types
 from tools.jira_tools import create_jira_ticket, CREATE_JIRA_TICKET_DECLARATION
+from state.pipeline_state import StateSDLC
 from config.settings import gem_api_key
 client = genai.Client(api_key = gem_api_key)
 
-def run_pm_agent(user_input):
+def run_pm_agent_node(state: StateSDLC) -> dict:
     # The client gets the API key from the environment variable `GEMINI_API_KEY`.
     tools = types.Tool(function_declarations=[CREATE_JIRA_TICKET_DECLARATION])
     config = types.GenerateContentConfig(system_instruction="You are a PM creating a JIRA Ticket. Always use create_jira_ticket tool. Never ask clarifying questions. Make reasonable assumptions for any missing fields",tools=[tools])
 
     contents = [
         types.Content(
-            role="user", parts=[types.Part(text=user_input)]
+            role="user", parts=[types.Part(text=state["user_input"])]
         )]
 
     response = client.models.generate_content(
@@ -51,7 +53,7 @@ def run_pm_agent(user_input):
         contents=contents,
     )
 
-    print(final_response.text)
+    return {"jira_ticket_details" : result}
     
 if __name__ == "__main__":
-    run_pm_agent("Create a Jira ticket for a login feature bug where users cannot sign in with valid credentials on the mobile app since yesterday's deployment")
+    run_pm_agent_node({"user_input": "Create a Jira ticket for a login feature bug...", "jira_ticket_details": {}, "code": ""})

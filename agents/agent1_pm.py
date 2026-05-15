@@ -54,6 +54,3 @@ def run_pm_agent_node(state: StateSDLC) -> dict:
     )
 
     return {"jira_ticket_details" : result}
-    
-if __name__ == "__main__":
-    run_pm_agent_node({"user_input": "Create a Jira ticket for a login feature bug...", "jira_ticket_details": {}, "code": ""})

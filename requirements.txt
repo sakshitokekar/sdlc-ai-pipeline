@@ -2,3 +2,10 @@ google-genai
 python-dotenv
 requests
 langgraph
+chromadb
+sentence-transformers
+langchain-text-splitters
+langchain-community
+tree-sitter
+tree-sitter-python
+networkx

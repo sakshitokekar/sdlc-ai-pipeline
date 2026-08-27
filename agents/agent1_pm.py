@@ -1,25 +1,27 @@
 # PM agent
+from typing import TypedDict
 from google import genai
 from google.genai import types
 from tools.jira_tools import create_jira_ticket, CREATE_JIRA_TICKET_DECLARATION
-from config.settings import gem_api_key
+from tools.gemini_utils import generate_with_retry
+from state.pipeline_state import StateSDLC
+from config.settings import gem_api_key, GEMINI_MODEL
 client = genai.Client(api_key = gem_api_key)
 
-def run_pm_agent(user_input):
+def run_pm_agent_node(state: StateSDLC) -> dict:
     # The client gets the API key from the environment variable `GEMINI_API_KEY`.
     tools = types.Tool(function_declarations=[CREATE_JIRA_TICKET_DECLARATION])
     config = types.GenerateContentConfig(system_instruction="You are a PM creating a JIRA Ticket. Always use create_jira_ticket tool. Never ask clarifying questions. Make reasonable assumptions for any missing fields",tools=[tools])
 
     contents = [
         types.Content(
-            role="user", parts=[types.Part(text=user_input)]
+            role="user", parts=[types.Part(text=state["user_input"])]
         )]
 
-    response = client.models.generate_content(
-        model="gemini-2.5-flash",
-        contents=contents,
-        config=config,
-    )
+    response = generate_with_retry(client, GEMINI_MODEL, contents, config)
+    if response is None:
+        print("Gemini API unavailable after retries — cannot create ticket.")
+        return {"jira_ticket_details": {}}
     
     print(response.candidates[0].content.parts[0].function_call)
     
@@ -45,13 +47,6 @@ def run_pm_agent(user_input):
     contents.append(response.candidates[0].content) # Append the content from the model's response.
     contents.append(types.Content(role="user", parts=[function_response_part])) # Append the function response
 
-    final_response = client.models.generate_content(
-        model="gemini-2.5-flash",
-        config=config,
-        contents=contents,
-    )
+    final_response = generate_with_retry(client, GEMINI_MODEL, contents, config)
 
-    print(final_response.text)
-    
-if __name__ == "__main__":
-    run_pm_agent("Create a Jira ticket for a login feature bug where users cannot sign in with valid credentials on the mobile app since yesterday's deployment")
+    return {"jira_ticket_details" : result}

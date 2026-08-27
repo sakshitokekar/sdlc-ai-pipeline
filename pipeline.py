@@ -1,6 +1,6 @@
 from langgraph.graph import START, END, StateGraph
-from langgraph.checkpoint.memory import MemorySaver
-from langgraph.types import interrupt
+from langgraph.checkpoint.sqlite import SqliteSaver
+from langgraph.types import interrupt, Command
 from state.pipeline_state import StateSDLC
 from agents.agent1_pm import run_pm_agent_node
 from agents.agent2_dev import run_dev_agent_node
@@ -65,7 +65,10 @@ def route_after_human_decision(state: StateSDLC) -> str:
     return "end"  # approve or abandon both end the automated pipeline here
 
 
-if __name__ == "__main__":
+def build_graph():
+    """Builds and returns the unconfigured StateGraph. Separated from
+    compilation so the checkpointer context manager can wrap compile()
+    and invoke() together in __main__."""
     graph = StateGraph(StateSDLC)
 
     graph.add_node("run_pm_agent_node", run_pm_agent_node)
@@ -98,39 +101,45 @@ if __name__ == "__main__":
         }
     )
 
-    # MemorySaver checkpointer is REQUIRED for interrupt() to work —
-    # it saves the paused state while waiting for the human's response.
-    # Dev-only: in-memory, lost on restart. Upgrade to SqliteSaver/PostgresSaver
-    # for production persistence (tracked in TODOs).
-    checkpointer = MemorySaver()
-    app = graph.compile(checkpointer=checkpointer)
+    return graph
 
-    # A thread_id is required by the checkpointer to know which paused
-    # conversation to resume. One thread per pipeline run.
-    config = {"configurable": {"thread_id": "sdlc-run-1"}}
 
-    results = app.invoke({
-        "user_input": "Create a Jira ticket for a login feature bug where users cannot sign in with valid credentials on the mobile app since yesterday's deployment",
-        "jira_ticket_details": {},
-        "code": "",
-        "test_results": {},
-        "dev_test_retry_count": 0
-    }, config=config)
+if __name__ == "__main__":
+    graph = build_graph()
 
-    # If the graph paused at an interrupt(), results will contain
-    # a special "__interrupt__" key instead of finishing normally.
-    if "__interrupt__" in results:
-        interrupt_data = results["__interrupt__"][0].value
-        print("\n" + "=" * 60)
-        print("PIPELINE PAUSED — HUMAN DECISION REQUIRED")
-        print("=" * 60)
-        print(interrupt_data["message"])
-        print("=" * 60)
+    # SqliteSaver checkpointer — persists pipeline state to disk so
+    # interrupted/crashed runs can be inspected or resumed, and paused
+    # interrupt() state survives even if the Python process restarts.
+    # This replaces MemorySaver (dev-only, in-memory, lost on restart).
+    with SqliteSaver.from_conn_string("codebase_search_rag/data/pipeline_checkpoints.db") as checkpointer:
+        app = graph.compile(checkpointer=checkpointer)
 
-        human_input = input("Your decision (approve/retry/abandon): ").strip().lower()
+        # A thread_id is required by the checkpointer to know which paused
+        # conversation to resume. One thread per pipeline run.
+        config = {"configurable": {"thread_id": "sdlc-run-1"}}
 
-        # Resume the graph with the human's decision
-        from langgraph.types import Command
-        results = app.invoke(Command(resume=human_input), config=config)
+        results = app.invoke({
+            "user_input": "Create a Jira ticket for a login feature bug where users cannot sign in with valid credentials on the mobile app since yesterday's deployment",
+            "jira_ticket_details": {},
+            "code": "",
+            "test_results": {},
+            "dev_test_retry_count": 0
+        }, config=config)
 
-    print(results)
+        # If the graph paused at an interrupt(), results will contain
+        # a special "__interrupt__" key instead of finishing normally.
+        if "__interrupt__" in results:
+            interrupt_data = results["__interrupt__"][0].value
+            print("\n" + "=" * 60)
+            print("PIPELINE PAUSED — HUMAN DECISION REQUIRED")
+            print("=" * 60)
+            print(interrupt_data["message"])
+            print("=" * 60)
+
+            human_input = input("Your decision (approve/retry/abandon): ").strip().lower()
+
+            # Resume the graph with the human's decision — still inside
+            # the `with` block so the same checkpointer connection is used.
+            results = app.invoke(Command(resume=human_input), config=config)
+
+        print(results)

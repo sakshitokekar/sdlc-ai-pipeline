@@ -2,6 +2,7 @@ google-genai
 python-dotenv
 requests
 langgraph
+langgraph-checkpoint-sqlite
 chromadb
 sentence-transformers
 langchain-text-splitters

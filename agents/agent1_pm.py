@@ -3,8 +3,9 @@ from typing import TypedDict
 from google import genai
 from google.genai import types
 from tools.jira_tools import create_jira_ticket, CREATE_JIRA_TICKET_DECLARATION
+from tools.gemini_utils import generate_with_retry
 from state.pipeline_state import StateSDLC
-from config.settings import gem_api_key
+from config.settings import gem_api_key, GEMINI_MODEL
 client = genai.Client(api_key = gem_api_key)
 
 def run_pm_agent_node(state: StateSDLC) -> dict:
@@ -17,11 +18,10 @@ def run_pm_agent_node(state: StateSDLC) -> dict:
             role="user", parts=[types.Part(text=state["user_input"])]
         )]
 
-    response = client.models.generate_content(
-        model="gemini-2.5-flash",
-        contents=contents,
-        config=config,
-    )
+    response = generate_with_retry(client, GEMINI_MODEL, contents, config)
+    if response is None:
+        print("Gemini API unavailable after retries — cannot create ticket.")
+        return {"jira_ticket_details": {}}
     
     print(response.candidates[0].content.parts[0].function_call)
     
@@ -47,10 +47,6 @@ def run_pm_agent_node(state: StateSDLC) -> dict:
     contents.append(response.candidates[0].content) # Append the content from the model's response.
     contents.append(types.Content(role="user", parts=[function_response_part])) # Append the function response
 
-    final_response = client.models.generate_content(
-        model="gemini-2.5-flash",
-        config=config,
-        contents=contents,
-    )
+    final_response = generate_with_retry(client, GEMINI_MODEL, contents, config)
 
     return {"jira_ticket_details" : result}

@@ -1,13 +1,15 @@
 from langgraph.graph import START, END, StateGraph
 from state.pipeline_state import StateSDLC
 from agents.agent1_pm import run_pm_agent_node
+from agents.agent2_dev import run_dev_agent_node
 
 if __name__ == "__main__":
     graph = StateGraph(StateSDLC)
     graph.add_node("run_pm_agent_node", run_pm_agent_node)
     graph.add_edge(START, "run_pm_agent_node")
-    graph.add_edge("run_pm_agent_node", END)
-    
+    graph.add_node("run_dev_agent_node", run_dev_agent_node)
+    graph.add_edge("run_pm_agent_node", "run_dev_agent_node")
+    graph.add_edge("run_dev_agent_node", END)
     app = graph.compile()
 
     results = app.invoke({

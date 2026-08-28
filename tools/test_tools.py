@@ -5,6 +5,7 @@ import re
 from google import genai
 from google.genai import types
 from config.settings import gem_api_key, GEMINI_MODEL
+from tools.gemini_utils import generate_with_retry
 
 client = genai.Client(api_key=gem_api_key)
 
@@ -46,14 +47,12 @@ def get_existing_test_code(repo_path: str, test_file: str = "tests/test_auth.py"
 
 
 #     generate_test_coverage(ticket_key, code_changes, existing_tests) -> dict:
-#         - calls Gemini to determine if existing tests cover the code changes
+#         - calls Gemini (with classified retry via generate_with_retry) to
+#           determine if existing tests cover the code changes
 #         - if not, generates new pytest test functions matching existing style
 #         - returns {"needs_new_tests": bool, "new_test_code": str, "reasoning": str, "reason_code": str}
 #         - schema validated via json.loads with fallback on parse failure
 def generate_test_coverage(ticket_key: str, code_changes: str, existing_tests: str) -> dict:
-    # NOTE: this f-string is deliberately flush-left even though it's inside
-    # an indented function body — an indented prompt sends extra leading
-    # whitespace to Gemini on every line, wasting tokens for no benefit.
     prompt = f"""You are a QA engineer reviewing code changes made for Jira ticket {ticket_key}.
 
 === CODE CHANGES MADE BY DEV AGENT ===
@@ -81,12 +80,16 @@ Respond in this exact JSON format, no markdown fences:
     )
     contents = [types.Content(role="user", parts=[types.Part(text=prompt)])]
 
+    response = generate_with_retry(client, GEMINI_MODEL, contents, config)
+    if response is None:
+        return {
+            "needs_new_tests": False,
+            "reasoning": "Gemini API unavailable after retries",
+            "new_test_code": "",
+            "reason_code": "COVERAGE_ANALYSIS_API_ERROR"
+        }
+
     try:
-        response = client.models.generate_content(
-            model=GEMINI_MODEL,
-            contents=contents,
-            config=config,
-        )
         cleaned = re.sub(r"^```json\s*|\s*```$", "", response.text.strip(), flags=re.MULTILINE)
         result = json.loads(cleaned)
         result["reason_code"] = "COVERAGE_ANALYSIS_SUCCESS"
@@ -97,13 +100,6 @@ Respond in this exact JSON format, no markdown fences:
             "reasoning": "Failed to parse QA response as JSON",
             "new_test_code": "",
             "reason_code": "COVERAGE_ANALYSIS_PARSE_ERROR"
-        }
-    except Exception as e:
-        return {
-            "needs_new_tests": False,
-            "reasoning": f"Error calling Gemini: {str(e)}",
-            "new_test_code": "",
-            "reason_code": "COVERAGE_ANALYSIS_API_ERROR"
         }
 
 

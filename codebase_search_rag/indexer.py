@@ -96,6 +96,18 @@ class Indexer:
         root = tree.root_node
         chunks = []
 
+        # Collects every top-level node that is NEITHER a function nor a
+        # class — imports, module-level constants, and critically things
+        # like `if __name__ == "__main__":` blocks. Without this, RAG
+        # structurally could never retrieve module-level code (this was a
+        # real bug: app.py's `app.run(host=..., debug=...)` line lives
+        # inside an `if __name__` block and was invisible to retrieval,
+        # forcing Gemini to guess its exact bytes for a code-fix — which
+        # failed the exact-match replacement in agent2_dev.py). These are
+        # consolidated into ONE chunk per file rather than one per
+        # statement, since they're typically small and read together.
+        module_level_nodes = []
+
         # Walk top-level nodes — handle classes and top-level functions separately
         for node in root.children:
             if node.type == "class_definition":
@@ -169,6 +181,44 @@ class Indexer:
                         "language": "python"
                     }
                 ))
+            else:
+                # Everything that isn't a class or function definition —
+                # import statements, module-level assignments, if/for/with
+                # blocks at the top level (including `if __name__ ==
+                # "__main__":`), decorators on nothing, etc. Skip pure
+                # comment/whitespace-only nodes implicitly (tree-sitter
+                # doesn't emit separate nodes for those at this level).
+                module_level_nodes.append(node)
+
+        # Consolidate all collected module-level nodes into ONE chunk
+        # spanning from the first to the last such node, so retrieval can
+        # find (for example) the `if __name__ == "__main__":` block that
+        # would otherwise never be chunked at all.
+        if module_level_nodes:
+            start_byte = module_level_nodes[0].start_byte
+            end_byte = module_level_nodes[-1].end_byte
+            start_line = module_level_nodes[0].start_point[0]
+            end_line = module_level_nodes[-1].end_point[0]
+            module_symbol_id = self._make_symbol_id(file_path, "__module_level__")
+
+            chunks.append(Chunk(
+                id=self._make_chunk_id(file_path, "__module_level__"),
+                content=source_code[start_byte:end_byte].decode("utf-8"),
+                start_line=start_line,
+                end_line=end_line,
+                path=file_path,
+                metadata={
+                    "symbol_id": module_symbol_id,
+                    "function_name": "__module_level__",
+                    "class_name": None,
+                    "file_path": file_path,
+                    "start_line": start_line,
+                    "end_line": end_line,
+                    "chunk_type": "module_level",
+                    "language": "python"
+                }
+            ))
+
         return chunks
 
 
@@ -242,7 +292,6 @@ class Indexer:
                 "end_line": chunk.end_line,
                 "type": chunk.metadata["chunk_type"],
                 "symbol_name": short_name,
-                "chunk_id": chunk.id,
             }
 
             # Register in name_index for fast resolution
@@ -258,8 +307,7 @@ class Indexer:
             raw_calls = self._extract_calls(tree.root_node)
             for raw_call in raw_calls:
                 resolved = self._resolve_call(raw_call, file_path)
-                if resolved in self.symbol_table:
-                    self.graph.add_edge(symbol_id, resolved)
+                self.graph.add_edge(symbol_id, resolved)
 
 
 #     _extract_calls(node) -> list[str]:
@@ -398,7 +446,7 @@ class Indexer:
 #         - used by retriever and Agent 2 to find a symbol's location
     def find_symbol(self, name: str) -> list[dict]:
         candidates = self.name_index.get(name, [])
-        return [{"symbol_id": c, **self.symbol_table[c]} for c in candidates if c in self.symbol_table]
+        return [self.symbol_table[c] for c in candidates if c in self.symbol_table]
 
 
 #     index_repository() -> None:
@@ -407,14 +455,7 @@ class Indexer:
 #         - passes full file source code to build_graphs for correct import extraction
 #         - persists ALL indexes to disk ONCE after all files processed (not per file)
     def index_repository(self) -> None:
-        # Detect deleted files before processing existing ones
-        current_files = {str(p) for p in Path(self.repo_path).rglob("*.py")}
-        indexed_files = set(self.file_hashes.keys())
-        for file_path in indexed_files - current_files:
-            self._cleanup_file_symbols(file_path)
-            del self.file_hashes[file_path]
-
-        for file_path in Path(self.repo_path).rglob("*.py"):            
+        for file_path in Path(self.repo_path).rglob("*.py"):
             file_path_str = str(file_path)
             stored = self.file_hashes.get(file_path_str, None)
 

@@ -15,6 +15,7 @@ from agents.agent1_pm import run_pm_agent_node
 from agents.agent2_dev import run_dev_agent_node
 from agents.agent5_test import run_test_agent_node
 from agents.agent3_build import run_build_agent_node
+from agents.agent4_deploy import run_deploy_agent_node
 
 MAX_RETRIES = 3  # guardrail: prevents Agent 2 <-> Agent 5 from looping forever
 
@@ -97,6 +98,7 @@ def build_graph():
     graph.add_node("run_dev_agent_node", run_dev_agent_node)
     graph.add_node("run_test_agent_node", run_test_agent_node)
     graph.add_node("run_build_agent_node", run_build_agent_node)
+    graph.add_node("run_deploy_agent_node", run_deploy_agent_node)
     graph.add_node("increment_retry_node", increment_retry_node)
     graph.add_node("escalate_to_human_node", escalate_to_human_node)
 
@@ -114,7 +116,8 @@ def build_graph():
         }
     )
     graph.add_edge("increment_retry_node", "run_dev_agent_node")
-    graph.add_edge("run_build_agent_node", END)
+    graph.add_edge("run_build_agent_node", "run_deploy_agent_node")
+    graph.add_edge("run_deploy_agent_node", END)
 
     graph.add_conditional_edges(
         "escalate_to_human_node",
@@ -195,13 +198,14 @@ if __name__ == "__main__":
             results = app.invoke(None, config=config)
         else:
             results = app.invoke({
-                "user_input": "Create a Jira ticket for a login feature bug where users cannot sign in with valid credentials on the mobile app since yesterday's deployment",
+                "user_input": "The Flask app inside the Docker container only binds to host 127.0.0.1 (localhost), so it is unreachable from outside the container when deployed to Kubernetes. app.run() in app.py needs host='0.0.0.0' so it listens on all network interfaces, not just localhost. Additionally, debug=True should be disabled since it exposes an interactive debugger with a PIN, which is a security risk in any deployed environment.",
                 "jira_ticket_details": {},
                 "code": "",
                 "test_results": {},
                 "dev_test_retry_count": 0,
                 "human_decision": "",
-                "build_results": {}
+                "build_results": {},
+                "deploy_results": {}
             }, config=config)
 
         # If the graph paused at an interrupt(), results will contain a

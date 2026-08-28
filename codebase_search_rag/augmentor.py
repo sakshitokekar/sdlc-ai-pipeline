@@ -65,10 +65,18 @@ class Augmentor:
 #     build_prompt(jira_ticket, retrieval_result, previous_failure=None) -> str:
 #         - takes jira ticket dict from StateSDLC and retrieval result from retriever.retrieve()
 #         - previous_failure: optional dict with test failure info, only passed on retry attempts
+#         - full_file_contents: optional dict {relative_path: full source text} for files
+#           that are candidates for modification. RAG only chunks function/class-level
+#           code (see indexer.py's parse_and_chunk) — module-level code like imports,
+#           top-level constants, and `if __name__ == "__main__":` blocks is NEVER
+#           retrieved as a chunk. Without the full file, Gemini has to GUESS the exact
+#           bytes of original_code for anything outside a function/class, which fails
+#           the exact-match replacement in agent2_dev.py. Passing full files for
+#           candidate targets guarantees byte-exact ground truth to copy from.
 #         - builds a structured prompt for Agent 2 (Dev Agent)
-#         - includes: retry context (if applicable), problem statement, primary targets, relevant code chunks, constraints
+#         - includes: retry context (if applicable), problem statement, primary targets, relevant code chunks, full file contents, constraints
 #         - returns formatted prompt string ready to send to Gemini
-    def build_prompt(self, jira_ticket: dict, retrieval_result: dict, previous_failure: dict = None) -> str:
+    def build_prompt(self, jira_ticket: dict, retrieval_result: dict, previous_failure: dict = None, full_file_contents: dict = None) -> str:
         ticket_key = jira_ticket.get("ticket_key", "UNKNOWN")
         ticket_url = jira_ticket.get("url", "")
 
@@ -122,6 +130,22 @@ File: {file_path} (lines {start_line}-{end_line})
 Source: {source} | Relevance score: {score:.2f}
 ```python
 {content}
+```
+"""
+
+        # Full file contents for candidate target files — this is the fix
+        # for exact-match replacement failures on module-level code (like
+        # `if __name__ == "__main__":` blocks) that RAG chunking never
+        # retrieves, since indexer.py only chunks function_definition and
+        # class_definition nodes, not top-level statements.
+        full_files_text = ""
+        if full_file_contents:
+            for file_path, file_text in full_file_contents.items():
+                full_files_text += f"""
+---
+FULL FILE: {file_path}
+```python
+{file_text}
 ```
 """
 
@@ -184,6 +208,9 @@ Files that import this code (changing these could break dependents):
 
 === RELEVANT CODE CHUNKS ===
 {chunks_text if chunks_text else "No relevant chunks found."}
+
+=== FULL FILE CONTENTS (use these for byte-exact original_code — RAG chunks above only cover function/class-level code, NOT module-level code like imports or `if __name__ == "__main__":` blocks) ===
+{full_files_text if full_files_text else "No full files provided."}
 
 === INSTRUCTIONS ===
 1. Analyse the Jira ticket and the code chunks above carefully.

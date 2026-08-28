@@ -3,6 +3,7 @@
 import ast
 import json
 import re
+from pathlib import Path
 from datetime import datetime
 from google import genai
 from google.genai import types
@@ -37,6 +38,41 @@ def _normalize_relative_path(file_path: str, repo_path: str) -> str:
     if file_path.startswith(repo_folder_name + "/"):
         return file_path[len(repo_folder_name) + 1:]
     return file_path.lstrip("/")
+
+
+def _gather_full_file_contents(repo_path: str, retrieval_result: dict) -> dict:
+    """Reads the FULL source of every file referenced by the retrieval
+    result's chunks, plus known top-level entry point files (app.py) that
+    often contain module-level code RAG never chunks. Returns
+    {relative_path: full_source_text}. This is what guarantees Agent 2 has
+    byte-exact ground truth to build original_code from, instead of relying
+    only on function/class-level chunks that miss things like
+    `if __name__ == "__main__":` blocks."""
+    candidate_paths = set()
+
+    for chunk in retrieval_result.get("chunks", []):
+        file_path = chunk.get("metadata", {}).get("file_path")
+        if file_path:
+            candidate_paths.add(file_path)
+
+    # Always include known entry-point files, since these commonly contain
+    # module-level code (imports, __main__ blocks) that RAG structurally
+    # cannot chunk (see indexer.py's parse_and_chunk — only function/class
+    # nodes become chunks, top-level statements never do).
+    for entry_point in ("app.py",):
+        full_path = Path(repo_path) / entry_point
+        if full_path.exists():
+            candidate_paths.add(entry_point)
+
+    full_contents = {}
+    for relative_path in candidate_paths:
+        full_path = Path(repo_path) / relative_path
+        try:
+            full_contents[relative_path] = full_path.read_text()
+        except (FileNotFoundError, UnicodeDecodeError):
+            continue
+
+    return full_contents
 
 
 def _is_valid_python(source: str) -> tuple[bool, str]:
@@ -88,8 +124,15 @@ def run_dev_agent_node(state: StateSDLC) -> dict:
     retrieval_result = retriever.retrieve(query, top_k=10)
     log.success(f"Found {len(retrieval_result['chunks'])} relevant chunks")
 
-    # --- Step 5: Build the prompt using Augmentor, including retry context if applicable ---
-    prompt = augmentor.build_prompt(jira_ticket, retrieval_result, previous_failure=previous_failure)
+    # --- Step 5: Build the prompt using Augmentor, including retry context
+    # and full file contents (for byte-exact original_code — see
+    # _gather_full_file_contents docstring for why this is necessary) ---
+    full_file_contents = _gather_full_file_contents(REPO_PATH, retrieval_result)
+    prompt = augmentor.build_prompt(
+        jira_ticket, retrieval_result,
+        previous_failure=previous_failure,
+        full_file_contents=full_file_contents
+    )
 
     # --- Step 6: Call Gemini to generate the code fix (with classified retry) ---
     config = types.GenerateContentConfig(
@@ -212,8 +255,22 @@ COMMIT: {commit_result.get('commit_url', 'N/A')}
     add_jira_comment(ticket_key, comment)
     update_jira_status(ticket_key, "In Progress")
 
+    # Two distinct signals, not one — this distinction matters:
+    #   had_intended_changes: did Gemini PROPOSE any file changes at all?
+    #   code_changes_applied: did any of those proposed changes actually
+    #                          get written to disk?
+    # had_intended_changes=False, applied=False -> Gemini legitimately
+    #   decided nothing needs to change (e.g. ticket already fixed by a
+    #   prior run). Safe for Agent 3 to proceed and rebuild as-is.
+    # had_intended_changes=True, applied=False -> Gemini WANTED to fix
+    #   something but every change was rejected (exact-match failure or
+    #   invalid syntax). This is the dangerous silent-failure case — Agent
+    #   3 must NOT rebuild/redeploy the stale image as if the fix landed.
+    had_intended_changes = len(change_plan.get("files_to_modify", [])) > 0
     return {
         "code": json.dumps(change_plan),
+        "code_changes_applied": len(modified_files) > 0,
+        "had_intended_changes": had_intended_changes,
     }
 
 

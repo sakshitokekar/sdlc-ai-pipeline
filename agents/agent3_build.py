@@ -23,6 +23,36 @@ def run_build_agent_node(state: StateSDLC) -> dict:
     jira_ticket = state["jira_ticket_details"]
     ticket_key = jira_ticket.get("ticket_key", "UNKNOWN")
 
+    # --- Step 0: Refuse to build a stale image if Agent 2 INTENDED to fix
+    # something but the fix silently failed to apply (e.g. exact-match
+    # replacement or AST validation rejected every proposed change). This
+    # is distinct from "Gemini legitimately found nothing to change" —
+    # that case is safe to proceed past. Returning success: False here
+    # naturally cascades to Agent 4, which already skips deployment when
+    # build_results.success is False. ---
+    had_intended_changes = state.get("had_intended_changes", False)
+    code_changes_applied = state.get("code_changes_applied", False)
+
+    if had_intended_changes and not code_changes_applied:
+        log.error(
+            f"Agent 2 proposed code changes for {ticket_key} but none were "
+            f"successfully applied. Refusing to build/redeploy the stale image."
+        )
+        comment = f"""Agent 3 (Build) SKIPPED for {ticket_key}.
+
+WHO: Agent 3 (Build Agent)
+WHAT: Agent 2 proposed code changes that were meant to fix this ticket, but every proposed change was rejected (exact-match text not found, or would have produced invalid Python)
+WHY: Refusing to rebuild/redeploy the existing image as if the fix had landed — that would silently ship unfixed code
+ACTION NEEDED: Review Agent 2's comment on this ticket for the specific rejected changes, and either fix manually or re-run the pipeline to retry
+"""
+        add_jira_comment(ticket_key, comment)
+        return {
+            "build_results": {
+                "success": False,
+                "reason_code": "CHANGES_NOT_APPLIED"
+            }
+        }
+
     # --- Step 1: Verify Docker is actually available before doing anything else ---
     docker_status = check_docker_available()
     if not docker_status["available"]:

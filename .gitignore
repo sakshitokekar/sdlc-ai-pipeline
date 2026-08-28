@@ -5,3 +5,4 @@ __pycache__/
 .DS_Store
 practice/
 codebase_search_rag/data
+codebase_search_rag/data/pipeline.log
